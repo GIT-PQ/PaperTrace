@@ -162,6 +162,58 @@ class PaperReferenceSearcher:
         # 初始化Tavily客户端
         self.tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
     
+    def _generate_citation(self, ref: Dict, index: int) -> str:
+        """
+        生成参考文献的引用格式
+        
+        根据中国国家标准 GB/T 7714-2015 生成引用格式
+        
+        Args:
+            ref: 参考文献信息字典
+            index: 引用序号
+            
+        Returns:
+            格式化的引用字符串
+        """
+        title = ref.get('title', '未知标题')
+        url = ref.get('url', '')
+        
+        # 尝试从 URL 提取来源信息
+        source = "网络资源"
+        if url:
+            try:
+                from urllib.parse import urlparse
+                domain = urlparse(url).netloc
+                # 常见学术网站映射
+                domain_map = {
+                    'arxiv.org': 'arXiv',
+                    'scholar.google.com': 'Google Scholar',
+                    'dl.acm.org': 'ACM Digital Library',
+                    'ieeexplore.ieee.org': 'IEEE Xplore',
+                    'springer.com': 'Springer',
+                    'nature.com': 'Nature',
+                    'science.org': 'Science',
+                    'semanticscholar.org': 'Semantic Scholar',
+                    'pubmed.ncbi.nlm.nih.gov': 'PubMed'
+                }
+                source = domain_map.get(domain, domain)
+            except:
+                pass
+        
+        # 生成引用格式：[序号] 标题[来源类型]. 来源, 访问日期.
+        from datetime import datetime
+        access_date = datetime.now().strftime('%Y-%m-%d')
+        
+        # 判断来源类型
+        if 'arxiv' in url.lower():
+            citation = f"[{index}] {title}[EB/OL]. arXiv预印本, {access_date}. {url}"
+        elif any(d in url.lower() for d in ['scholar.google', 'semanticscholar']):
+            citation = f"[{index}] {title}[EB/OL]. {source}, {access_date}. {url}"
+        else:
+            citation = f"[{index}] {title}[EB/OL]. {source}, {access_date}. {url}"
+        
+        return citation
+    
     def analyze_complexity(self, paper_content: str) -> int:
         """
         分析论文复杂度，返回推荐的片段数
@@ -292,16 +344,16 @@ class PaperReferenceSearcher:
 5. **重要**：最多拆分为 {max_segments} 个片段，请合理合并相似内容
 
 请以JSON格式返回拆分结果，格式如下：
-{
+{{
     "segments": [
-        {
+        {{
             "title": "片段标题（简短描述该片段的主题）",
             "content": "片段的完整内容",
             "segment_type": "片段类型（background/method/experiment/discussion/conclusion/other）",
             "key_concepts": ["该片段涉及的关键概念或术语"]
-        }
+        }}
     ]
-}
+}}
 
 注意：
 - 片段数量不超过 {max_segments} 个
@@ -585,6 +637,7 @@ class PaperReferenceSearcher:
         print(self.stats.to_string())
         
         return {
+            "original_content": paper_content,  # 原始论文内容
             "segments": [seg.to_dict() for seg in segments],
             "summary": {
                 "total_segments": len(segments),
@@ -616,8 +669,19 @@ class PaperReferenceSearcher:
         output.append("论文参考文献搜索结果")
         output.append("=" * 70)
         
+        # 显示原始论文内容
+        original_content = results.get("original_content", "")
+        if original_content:
+            output.append("\n" + "-" * 70)
+            output.append("原始论文内容")
+            output.append("-" * 70)
+            output.append(original_content)
+        
         summary = results.get("summary", {})
-        output.append(f"\n共拆分为 {summary.get('total_segments', 0)} 个片段")
+        output.append("\n" + "-" * 70)
+        output.append("搜索结果摘要")
+        output.append("-" * 70)
+        output.append(f"共拆分为 {summary.get('total_segments', 0)} 个片段")
         output.append(f"共找到 {summary.get('total_references', 0)} 篇参考文献")
         output.append(f"去重后 {summary.get('unique_references', 0)} 篇")
         output.append(f"每个片段最多 {summary.get('refs_per_segment', 5)} 篇参考文献")
@@ -633,11 +697,8 @@ class PaperReferenceSearcher:
             output.append(f"类型: {segment['segment_type']}")
             output.append(f"关键概念: {', '.join(segment['key_concepts']) if segment['key_concepts'] else '无'}")
             
-            # 显示片段内容摘要
-            content = segment['content']
-            if len(content) > 200:
-                content = content[:200] + "..."
-            output.append(f"\n内容摘要: {content}")
+            # 显示片段内容（完整显示，不截断）
+            output.append(f"\n片段内容:\n{segment['content']}")
             
             # 显示搜索查询
             output.append(f"\n搜索查询:")
@@ -651,11 +712,11 @@ class PaperReferenceSearcher:
                 output.append(f"      URL: {ref['url']}")
                 output.append(f"      相关性: {ref['score']:.2f}")
                 output.append(f"      来源查询: {ref['query']}")
-                # 摘要
-                content = ref['content']
-                if len(content) > 150:
-                    content = content[:150] + "..."
-                output.append(f"      摘要: {content}")
+                # 引用格式
+                citation = self._generate_citation(ref, i)
+                output.append(f"      引用格式: {citation}")
+                # # 摘要（完整显示，不截断）
+                # output.append(f"      摘要: {ref['content']}")
         
         return "\n".join(output)
     
@@ -672,7 +733,16 @@ class PaperReferenceSearcher:
         output = []
         output.append("# 论文参考文献搜索结果\n")
         
+        # 显示原始论文内容
+        original_content = results.get("original_content", "")
+        if original_content:
+            output.append("## 原始论文内容\n")
+            output.append("```")
+            output.append(original_content)
+            output.append("```\n")
+        
         summary = results.get("summary", {})
+        output.append("## 搜索结果摘要\n")
         output.append(f"> 共拆分为 **{summary.get('total_segments', 0)}** 个片段，")
         output.append(f"> 找到 **{summary.get('total_references', 0)}** 篇参考文献")
         output.append(f"> （去重后 **{summary.get('unique_references', 0)}** 篇）\n")
@@ -686,11 +756,8 @@ class PaperReferenceSearcher:
             output.append(f"- **类型**: {segment['segment_type']}")
             output.append(f"- **关键概念**: {', '.join(segment['key_concepts']) if segment['key_concepts'] else '无'}\n")
             
-            # 片段内容
-            content = segment['content']
-            if len(content) > 300:
-                content = content[:300] + "..."
-            output.append(f"**内容摘要**:\n> {content}\n")
+            # 片段内容（完整显示，不截断）
+            output.append(f"**片段内容**:\n```\n{segment['content']}\n```\n")
             
             # 参考文献
             output.append(f"**推荐参考文献** ({len(segment['references'])} 篇):\n")
@@ -698,12 +765,136 @@ class PaperReferenceSearcher:
                 output.append(f"{i}. **{ref['title']}**")
                 output.append(f"   - 链接: [{ref['url']}]({ref['url']})")
                 output.append(f"   - 相关性: {ref['score']:.2f}")
-                content = ref['content']
-                if len(content) > 100:
-                    content = content[:100] + "..."
-                output.append(f"   - 摘要: {content}\n")
+                # 引用格式
+                citation = self._generate_citation(ref, i)
+                output.append(f"   - 引用格式: {citation}")
+                # # 摘要（完整显示，不截断）
+                # output.append(f"   - 摘要: {ref['content']}\n")
         
         return "\n".join(output)
+
+
+# ==================== 输入校验工具函数 ====================
+
+class InputResult:
+    """输入结果"""
+    BACK = "back"      # 用户选择回退
+    QUIT = "quit"      # 用户选择退出
+    VALUE = "value"    # 有效值
+
+
+def get_valid_input(prompt: str,
+                    validator: callable,
+                    default: str = None,
+                    allow_back: bool = False,
+                    allow_quit: bool = False) -> tuple:
+    """
+    获取有效输入
+    
+    Args:
+        prompt: 提示信息
+        validator: 校验函数，返回 (is_valid, converted_value, error_msg)
+        default: 默认值
+        allow_back: 是否允许回退
+        allow_quit: 是否允许退出
+    
+    Returns:
+        (result_type, value): 结果类型和值
+    """
+    while True:
+        try:
+            user_input = input(prompt).strip()
+        except EOFError:
+            return InputResult.QUIT, None
+        
+        # 检查退出命令
+        if allow_quit and user_input.lower() in ['q', 'quit', 'exit']:
+            return InputResult.QUIT, None
+        
+        # 检查回退命令
+        if allow_back and user_input.lower() in ['b', 'back']:
+            return InputResult.BACK, None
+        
+        # 检查默认值
+        if not user_input and default is not None:
+            return InputResult.VALUE, default
+        
+        # 校验
+        is_valid, value, error_msg = validator(user_input)
+        if is_valid:
+            return InputResult.VALUE, value
+        
+        print(f"输入无效: {error_msg}，请重新输入")
+
+
+def validate_choice(min_val: int, max_val: int):
+    """创建选项校验器"""
+    def validator(user_input: str):
+        if not user_input:
+            return False, None, f"请输入 {min_val}-{max_val} 的数字"
+        try:
+            value = int(user_input)
+            if min_val <= value <= max_val:
+                return True, value, ""
+            return False, None, f"请输入 {min_val}-{max_val} 的数字"
+        except ValueError:
+            return False, None, "请输入有效的数字"
+    return validator
+
+
+def validate_positive_int(min_val: int = 1, max_val: int = 100):
+    """创建正整数校验器"""
+    def validator(user_input: str):
+        if not user_input:
+            return False, None, "请输入一个数字"
+        try:
+            value = int(user_input)
+            if min_val <= value <= max_val:
+                return True, value, ""
+            return False, None, f"请输入 {min_val}-{max_val} 之间的整数"
+        except ValueError:
+            return False, None, "请输入有效的整数"
+    return validator
+
+
+def validate_yes_no():
+    """创建是/否校验器"""
+    def validator(user_input: str):
+        if user_input.lower() in ['y', 'yes', '是']:
+            return True, True, ""
+        if user_input.lower() in ['n', 'no', '否']:
+            return True, False, ""
+        return False, None, "请输入 y 或 n"
+    return validator
+
+
+def get_paper_input() -> Optional[str]:
+    """
+    获取论文内容输入
+    
+    Returns:
+        论文内容，如果用户选择退出则返回 None
+    """
+    print("\n请输入论文内容（输入空行结束，输入 q 退出）:\n")
+    
+    lines = []
+    while True:
+        try:
+            line = input()
+        except EOFError:
+            return None
+        
+        # 检查退出命令
+        if line.lower() in ['q', 'quit', 'exit']:
+            return None
+        
+        # 空行结束输入
+        if line == "":
+            break
+        
+        lines.append(line)
+    
+    return "\n".join(lines)
 
 
 def main():
@@ -711,115 +902,307 @@ def main():
     print("=" * 70)
     print("论文参考文献智能搜索工具")
     print("=" * 70)
-    print("\n请输入论文内容（输入空行结束）:\n")
+    print("\n提示：在任意输入步骤，输入 'q' 退出程序")
     
-    # 读取多行输入
-    lines = []
+    # 主循环：允许用户连续处理多篇论文
     while True:
-        line = input()
-        if line == "":
-            break
-        lines.append(line)
-    
-    paper_content = "\n".join(lines)
-    
-    if not paper_content.strip():
-        print("未输入论文内容，程序退出")
-        return
-    
-    # 选择搜索模式
-    print("\n请选择搜索模式：")
-    print("1. 预算驱动模式 - 指定 API 调用上限（推荐）")
-    print("2. 粒度控制模式 - 手动设置参数")
-    print("3. 智能规划模式 - AI 推荐方案")
-    
-    mode_choice = input("\n请选择 (1-3, 默认1): ").strip() or "1"
-    
-    config = SearchConfig()
-    plan = None
-    
-    if mode_choice == "1":
-        # 预算驱动模式
-        config.mode = SearchMode.BUDGET
-        max_calls = input("请输入最大 API 调用次数 (默认20): ").strip()
-        config.max_api_calls = int(max_calls) if max_calls else 20
-        config.refs_per_segment = 3
+        # ========== 步骤 1：输入论文内容 ==========
+        paper_content = get_paper_input()
         
-        # 显示预估
-        searcher = PaperReferenceSearcher(config)
-        plan_result = searcher.plan_with_budget(paper_content)
-        print(f"\n预计拆分 {plan_result['segments']} 个片段，每片段 {plan_result['queries_per_segment']} 个查询")
-        print(f"预计 API 调用：{plan_result['estimated_calls']} 次")
-        
-        confirm = input("是否继续？(y/n): ").strip().lower()
-        if confirm != 'y':
-            print("已取消")
+        if paper_content is None:
+            print("\n感谢使用，再见！")
             return
+        
+        if not paper_content.strip():
+            print("未输入论文内容，请重新输入")
+            continue
+        
+        # ========== 步骤 2：选择模式和配置参数 ==========
+        config = SearchConfig()
+        plan = None
+        
+        # 模式选择循环
+        while True:
+            print("\n" + "-" * 40)
+            print("请选择搜索模式：")
+            print("1. 预算驱动模式 - 指定 API 调用上限（推荐）")
+            print("2. 粒度控制模式 - 手动设置参数")
+            print("3. 智能规划模式 - 预设方案（AI规划暂未实现）")
             
-    elif mode_choice == "2":
-        # 粒度控制模式
-        config.mode = SearchMode.GRANULARITY
+            result, mode_choice = get_valid_input(
+                prompt="\n请选择 (1-3, 默认1): ",
+                validator=validate_choice(1, 3),
+                default="1",
+                allow_quit=True
+            )
+            
+            if result == InputResult.QUIT:
+                print("\n感谢使用，再见！")
+                return
+            
+            # ========== 预算驱动模式 ==========
+            if mode_choice == 1:
+                config.mode = SearchMode.BUDGET
+                
+                # 输入 API 调用次数
+                while True:
+                    result, max_calls = get_valid_input(
+                        prompt="请输入最大 API 调用次数 (5-100, 默认20): ",
+                        validator=validate_positive_int(5, 100),
+                        default="20",
+                        allow_back=True,
+                        allow_quit=True
+                    )
+                    
+                    if result == InputResult.QUIT:
+                        print("\n感谢使用，再见！")
+                        return
+                    if result == InputResult.BACK:
+                        break  # 返回模式选择
+                    
+                    config.max_api_calls = max_calls
+                    config.refs_per_segment = 3
+                    
+                    # 显示预估
+                    try:
+                        searcher = PaperReferenceSearcher(config)
+                        plan_result = searcher.plan_with_budget(paper_content)
+                        print(f"\n预计拆分 {plan_result['segments']} 个片段，每片段 {plan_result['queries_per_segment']} 个查询")
+                        print(f"预计 API 调用：{plan_result['estimated_calls']} 次")
+                    except ValueError as e:
+                        print(f"配置错误: {e}")
+                        continue
+                    
+                    # 确认执行
+                    result, confirm = get_valid_input(
+                        prompt="是否继续？(y/n): ",
+                        validator=validate_yes_no(),
+                        allow_back=True,
+                        allow_quit=True
+                    )
+                    
+                    if result == InputResult.QUIT:
+                        print("\n感谢使用，再见！")
+                        return
+                    if result == InputResult.BACK:
+                        continue  # 重新输入参数
+                    
+                    if confirm:
+                        break  # 继续执行
+                    else:
+                        print("已取消，返回模式选择...")
+                        break  # 返回模式选择
+                
+                # 如果用户取消了，重新选择模式
+                if not confirm:
+                    continue
+                else:
+                    break  # 继续执行搜索
+            
+            # ========== 粒度控制模式 ==========
+            elif mode_choice == 2:
+                config.mode = SearchMode.GRANULARITY
+                
+                # 输入参数循环
+                params_confirmed = False
+                while not params_confirmed:
+                    # 最大片段数
+                    result, max_segments = get_valid_input(
+                        prompt="请输入最大片段数 (1-20, 默认5): ",
+                        validator=validate_positive_int(1, 20),
+                        default="5",
+                        allow_back=True,
+                        allow_quit=True
+                    )
+                    
+                    if result == InputResult.QUIT:
+                        print("\n感谢使用，再见！")
+                        return
+                    if result == InputResult.BACK:
+                        break  # 返回模式选择
+                    
+                    config.max_segments = max_segments
+                    
+                    # 每片段查询数
+                    result, queries = get_valid_input(
+                        prompt="请输入每片段查询数 (1-10, 默认2): ",
+                        validator=validate_positive_int(1, 10),
+                        default="2",
+                        allow_back=True,
+                        allow_quit=True
+                    )
+                    
+                    if result == InputResult.QUIT:
+                        print("\n感谢使用，再见！")
+                        return
+                    if result == InputResult.BACK:
+                        continue  # 重新输入参数
+                    
+                    config.queries_per_segment = queries
+                    
+                    # 每片段文献数
+                    result, refs = get_valid_input(
+                        prompt="请输入每片段返回文献数 (1-10, 默认3): ",
+                        validator=validate_positive_int(1, 10),
+                        default="3",
+                        allow_back=True,
+                        allow_quit=True
+                    )
+                    
+                    if result == InputResult.QUIT:
+                        print("\n感谢使用，再见！")
+                        return
+                    if result == InputResult.BACK:
+                        continue  # 重新输入参数
+                    
+                    config.refs_per_segment = refs
+                    
+                    # 显示预估
+                    estimated = config.max_segments * config.queries_per_segment
+                    print(f"\n预计 API 调用：{estimated} 次")
+                    
+                    # 确认执行
+                    result, confirm = get_valid_input(
+                        prompt="是否继续？(y/n): ",
+                        validator=validate_yes_no(),
+                        allow_back=True,
+                        allow_quit=True
+                    )
+                    
+                    if result == InputResult.QUIT:
+                        print("\n感谢使用，再见！")
+                        return
+                    if result == InputResult.BACK:
+                        continue  # 重新输入参数
+                    
+                    if confirm:
+                        params_confirmed = True
+                    else:
+                        print("已取消，返回模式选择...")
+                        break  # 返回模式选择
+                
+                if not params_confirmed:
+                    continue  # 返回模式选择
+                else:
+                    break  # 继续执行搜索
+            
+            # ========== 智能规划模式 ==========
+            elif mode_choice == 3:
+                config.mode = SearchMode.SMART
+                config.refs_per_segment = 3
+                
+                try:
+                    searcher = PaperReferenceSearcher(config)
+                    plans = searcher.generate_plan_options(paper_content)
+                except ValueError as e:
+                    print(f"初始化错误: {e}")
+                    continue
+                
+                # 方案选择循环
+                while True:
+                    print("\nAI 为您推荐以下方案：")
+                    for i, p in enumerate(plans, 1):
+                        print(f"\n{i}. {p['name']}")
+                        print(f"   描述：{p['description']}")
+                        print(f"   片段数：{p['max_segments']}，每片段查询数：{p['queries_per_segment']}")
+                        print(f"   预计 API 调用：{p['estimated_calls']} 次")
+                        print(f"   预计返回文献：{p['estimated_refs']} 篇")
+                    
+                    result, plan_choice = get_valid_input(
+                        prompt="\n请选择方案 (1-3): ",
+                        validator=validate_choice(1, 3),
+                        allow_back=True,
+                        allow_quit=True
+                    )
+                    
+                    if result == InputResult.QUIT:
+                        print("\n感谢使用，再见！")
+                        return
+                    if result == InputResult.BACK:
+                        break  # 返回模式选择
+                    
+                    plan = plans[plan_choice - 1]
+                    
+                    # 确认执行
+                    result, confirm = get_valid_input(
+                        prompt=f"已选择「{plan['name']}」，是否继续？(y/n): ",
+                        validator=validate_yes_no(),
+                        allow_back=True,
+                        allow_quit=True
+                    )
+                    
+                    if result == InputResult.QUIT:
+                        print("\n感谢使用，再见！")
+                        return
+                    if result == InputResult.BACK:
+                        continue  # 重新选择方案
+                    
+                    if confirm:
+                        break  # 继续执行搜索
+                    else:
+                        print("已取消，返回模式选择...")
+                        break
+                
+                if plan is None or not confirm:
+                    continue  # 返回模式选择
+                else:
+                    break  # 继续执行搜索
         
-        max_segments = input("请输入最大片段数 (默认5): ").strip()
-        config.max_segments = int(max_segments) if max_segments else 5
+        # ========== 步骤 3：执行搜索 ==========
+        try:
+            searcher = PaperReferenceSearcher(config)
+            results = searcher.search_paper_references(paper_content, plan=plan)
+        except ValueError as e:
+            print(f"执行错误: {e}")
+            continue
         
-        queries = input("请输入每片段查询数 (默认2): ").strip()
-        config.queries_per_segment = int(queries) if queries else 2
+        # 格式化输出
+        print(searcher.format_results(results))
         
-        refs = input("请输入每片段返回文献数 (默认3): ").strip()
-        config.refs_per_segment = int(refs) if refs else 3
+        # ========== 步骤 4：保存结果 ==========
+        result, save = get_valid_input(
+            prompt="\n是否保存结果为 Markdown 文件？(y/n): ",
+            validator=validate_yes_no(),
+            allow_quit=True
+        )
         
-        estimated = config.max_segments * config.queries_per_segment
-        print(f"\n预计 API 调用：{estimated} 次")
-        
-        confirm = input("是否继续？(y/n): ").strip().lower()
-        if confirm != 'y':
-            print("已取消")
+        if result == InputResult.QUIT:
+            print("\n感谢使用，再见！")
             return
+        
+        if save:
+            result, filename = get_valid_input(
+                prompt="请输入文件名（默认: references.md）: ",
+                validator=lambda x: (True, x if x else "references.md", ""),
+                default="references.md",
+                allow_quit=True
+            )
             
-    elif mode_choice == "3":
-        # 智能规划模式
-        config.mode = SearchMode.SMART
-        config.refs_per_segment = 3
+            if result == InputResult.QUIT:
+                print("\n感谢使用，再见！")
+                return
+            
+            try:
+                with open(filename, 'w', encoding='utf-8') as f:
+                    f.write(searcher.format_markdown_results(results))
+                print(f"结果已保存到 {filename}")
+            except IOError as e:
+                print(f"保存失败: {e}")
         
-        searcher = PaperReferenceSearcher(config)
-        plans = searcher.generate_plan_options(paper_content)
+        # ========== 步骤 5：询问是否继续 ==========
+        result, continue_search = get_valid_input(
+            prompt="\n是否继续处理下一篇论文？(y/n): ",
+            validator=validate_yes_no(),
+            allow_quit=True
+        )
         
-        print("\nAI 为您推荐以下方案：")
-        for i, p in enumerate(plans, 1):
-            print(f"\n{i}. {p['name']}")
-            print(f"   描述：{p['description']}")
-            print(f"   片段数：{p['max_segments']}，每片段查询数：{p['queries_per_segment']}")
-            print(f"   预计 API 调用：{p['estimated_calls']} 次")
-            print(f"   预计返回文献：{p['estimated_refs']} 篇")
+        if result == InputResult.QUIT or not continue_search:
+            print("\n感谢使用，再见！")
+            return
         
-        plan_choice = input("\n请选择方案 (1-3): ").strip()
-        if plan_choice in ["1", "2", "3"]:
-            plan = plans[int(plan_choice) - 1]
-        else:
-            print("无效选择，使用标准方案")
-            plan = plans[1]
-    
-    else:
-        print("无效选择，使用默认预算驱动模式")
-        config.mode = SearchMode.BUDGET
-        config.max_api_calls = 20
-        config.refs_per_segment = 3
-    
-    # 创建搜索器并执行搜索
-    searcher = PaperReferenceSearcher(config)
-    results = searcher.search_paper_references(paper_content, plan=plan)
-    
-    # 格式化输出
-    print(searcher.format_results(results))
-    
-    # 可选：保存为 Markdown 文件
-    save = input("\n是否保存结果为 Markdown 文件？(y/n): ")
-    if save.lower() == 'y':
-        filename = input("请输入文件名（默认: references.md）: ") or "references.md"
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write(searcher.format_markdown_results(results))
-        print(f"结果已保存到 {filename}")
+        print("\n" + "=" * 70)
+        print("开始处理新论文...")
+        print("=" * 70)
 
 
 if __name__ == "__main__":
