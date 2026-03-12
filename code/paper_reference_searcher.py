@@ -55,14 +55,20 @@ class ExecutionStats:
     total_queries: int = 0
     bailian_calls: int = 0      # 百炼 API 调用次数
     tavily_calls: int = 0       # Tavily API 调用次数
+    tavily_credits: int = 0     # Tavily API Credits 消耗（advanced 模式每次 2 Credits）
     failed_calls: int = 0
     total_refs: int = 0
     unique_refs: int = 0
     
     @property
     def api_calls(self) -> int:
-        """总 API 调用次数"""
+        """总 API 调用次数（不包含 Credits 倍率）"""
         return self.bailian_calls + self.tavily_calls
+    
+    @property
+    def total_credits(self) -> int:
+        """总 Credits 消耗"""
+        return self.bailian_calls + self.tavily_credits
     
     def to_string(self, monthly_limit: int = 1000) -> str:
         """格式化统计信息"""
@@ -72,14 +78,17 @@ class ExecutionStats:
             f"总查询数：{self.total_queries}",
             f"API 调用：{self.api_calls} 次",
             f"  - 百炼 API：{self.bailian_calls} 次（论文拆分 + 片段分析）",
-            f"  - Tavily API：{self.tavily_calls} 次（文献搜索）",
+            f"  - Tavily API：{self.tavily_calls} 次（文献搜索，advanced 模式）",
+            f"Credits 消耗：{self.total_credits}",
+            f"  - 百炼 API：{self.bailian_calls} Credits",
+            f"  - Tavily API：{self.tavily_credits} Credits（advanced 模式每次 2 Credits）",
         ]
         if self.failed_calls > 0:
             lines.append(f"  （{self.failed_calls} 个查询无结果）")
         lines.append(f"返回文献：{self.total_refs} 篇（去重后 {self.unique_refs} 篇）")
-        if self.api_calls > 0:
-            percentage = (self.api_calls / monthly_limit) * 100
-            lines.append(f"预估成本：{self.api_calls}/{monthly_limit} ({percentage:.1f}%)")
+        if self.total_credits > 0:
+            percentage = (self.total_credits / monthly_limit) * 100
+            lines.append(f"预估成本：{self.total_credits}/{monthly_limit} ({percentage:.1f}%)")
         lines.append("==============================")
         return "\n".join(lines)
 
@@ -261,35 +270,40 @@ class PaperReferenceSearcher:
         complexity_score = self.analyze_complexity(paper_content)
         max_api_calls = self.config.max_api_calls
         
-        # 预估公式：total = 1 + segments + segments * queries_per_segment
-        # 其中：1 = 论文拆分，segments = 片段分析，segments * queries = 文献搜索
-        # 反推：segments * (1 + queries_per_segment) = max_api_calls - 1
+        # 预估公式（按 Credits 计算）：
+        # total_credits = 1 + segments + segments * queries_per_segment * 2
+        # 其中：1 = 论文拆分（百炼），segments = 片段分析（百炼），
+        #       segments * queries * 2 = 文献搜索（Tavily advanced 模式每次 2 Credits）
         
-        available_for_segments = max_api_calls - 1  # 减去论文拆分的 1 次调用
-        
+        # 简化计算：假设 segments 和 queries 的合理组合
         if max_api_calls <= 10:
-            # 低预算：合并为 2-3 个大片段，每片段 2-3 个查询
+            # 低预算：合并为 2-3 个大片段，每片段 1-2 个查询
             segments = min(3, complexity_score)
-            queries_per_segment = max(1, (available_for_segments - segments) // segments)
+            # 反推 queries_per_segment：(max - 1 - segments) / (segments * 2)
+            queries_per_segment = max(1, (max_api_calls - 1 - segments) // (segments * 2))
         elif max_api_calls <= 30:
-            # 中等预算：4-6 个片段，每片段 3-5 个查询
+            # 中等预算：4-6 个片段，每片段 2-3 个查询
             segments = min(6, complexity_score)
-            queries_per_segment = min(5, max(1, (available_for_segments - segments) // segments))
+            queries_per_segment = min(3, max(1, (max_api_calls - 1 - segments) // (segments * 2)))
         else:
             # 高预算：按论文自然结构拆分
             segments = complexity_score
-            queries_per_segment = min(5, max(1, (available_for_segments - segments) // segments))
+            queries_per_segment = min(4, max(1, (max_api_calls - 1 - segments) // (segments * 2)))
         
-        # 计算预估调用次数
-        # 1（论文拆分）+ segments（片段分析）+ segments * queries_per_segment（文献搜索）
-        estimated_calls = 1 + segments + segments * queries_per_segment
+        # 计算预估
+        bailian_calls = 1 + segments  # 论文拆分 + 片段分析
+        tavily_calls = segments * queries_per_segment  # Tavily 调用次数
+        tavily_credits = tavily_calls * 2  # Tavily advanced 模式每次 2 Credits
+        estimated_credits = bailian_calls + tavily_credits
         
         return {
             "segments": segments,
             "queries_per_segment": queries_per_segment,
-            "estimated_calls": estimated_calls,
-            "bailian_calls": 1 + segments,  # 论文拆分 + 片段分析
-            "tavily_calls": segments * queries_per_segment  # 文献搜索
+            "estimated_calls": bailian_calls + tavily_calls,  # 调用次数
+            "estimated_credits": estimated_credits,  # Credits 消耗
+            "bailian_calls": bailian_calls,
+            "tavily_calls": tavily_calls,
+            "tavily_credits": tavily_credits
         }
     
     def generate_plan_options(self, paper_content: str) -> List[Dict]:
@@ -304,8 +318,10 @@ class PaperReferenceSearcher:
         """
         complexity = self.analyze_complexity(paper_content)
         
-        # 预估公式：estimated_calls = 1 + segments + segments * queries_per_segment
-        # 1 = 论文拆分，segments = 片段分析，segments * queries = 文献搜索
+        # 预估公式（按 Credits 计算）：
+        # estimated_credits = 1 + segments + segments * queries_per_segment * 2
+        # 1 = 论文拆分（百炼），segments = 片段分析（百炼），
+        # segments * queries * 2 = 文献搜索（Tavily advanced 模式每次 2 Credits）
         
         economy_segments = 3
         economy_queries = 2
@@ -314,13 +330,23 @@ class PaperReferenceSearcher:
         deep_segments = min(8, complexity)
         deep_queries = 4
         
+        # 计算 Credits
+        economy_bailian = 1 + economy_segments
+        economy_tavily_credits = economy_segments * economy_queries * 2
+        standard_bailian = 1 + standard_segments
+        standard_tavily_credits = standard_segments * standard_queries * 2
+        deep_bailian = 1 + deep_segments
+        deep_tavily_credits = deep_segments * deep_queries * 2
+        
         return [
             {
                 "name": "经济方案",
                 "description": "快速检索核心文献，适合初步调研",
                 "max_segments": economy_segments,
                 "queries_per_segment": economy_queries,
-                "estimated_calls": 1 + economy_segments + economy_segments * economy_queries,  # 1 + 3 + 6 = 10
+                "estimated_calls": economy_bailian + economy_segments * economy_queries,
+                "estimated_credits": economy_bailian + economy_tavily_credits,
+                "tavily_credits": economy_tavily_credits,
                 "estimated_refs": 9
             },
             {
@@ -328,7 +354,9 @@ class PaperReferenceSearcher:
                 "description": "平衡覆盖度与成本，适合常规使用",
                 "max_segments": standard_segments,
                 "queries_per_segment": standard_queries,
-                "estimated_calls": 1 + standard_segments + standard_segments * standard_queries,
+                "estimated_calls": standard_bailian + standard_segments * standard_queries,
+                "estimated_credits": standard_bailian + standard_tavily_credits,
+                "tavily_credits": standard_tavily_credits,
                 "estimated_refs": 15
             },
             {
@@ -336,7 +364,9 @@ class PaperReferenceSearcher:
                 "description": "全面检索相关文献，适合深入研究",
                 "max_segments": deep_segments,
                 "queries_per_segment": deep_queries,
-                "estimated_calls": 1 + deep_segments + deep_segments * deep_queries,
+                "estimated_calls": deep_bailian + deep_segments * deep_queries,
+                "estimated_credits": deep_bailian + deep_tavily_credits,
+                "tavily_credits": deep_tavily_credits,
                 "estimated_refs": 24
             }
         ]
@@ -544,6 +574,7 @@ class PaperReferenceSearcher:
         for query in queries:
             try:
                 self.stats.tavily_calls += 1
+                self.stats.tavily_credits += 2  # Tavily advanced 模式每次消耗 2 Credits
                 results = self.tavily_client.search(
                     query=query,
                     search_depth="advanced",
@@ -604,7 +635,10 @@ class PaperReferenceSearcher:
             print(f"\n预计拆分 {max_segments} 个片段，每片段 {queries_per_segment} 个查询")
             print(f"预计 API 调用：{plan_result['estimated_calls']} 次")
             print(f"  - 百炼 API：{plan_result['bailian_calls']} 次（论文拆分 1 + 片段分析 {max_segments}）")
-            print(f"  - Tavily API：{plan_result['tavily_calls']} 次（文献搜索）")
+            print(f"  - Tavily API：{plan_result['tavily_calls']} 次（文献搜索，advanced 模式）")
+            print(f"预计 Credits 消耗：{plan_result['estimated_credits']}")
+            print(f"  - 百炼 API：{plan_result['bailian_calls']} Credits")
+            print(f"  - Tavily API：{plan_result['tavily_credits']} Credits（advanced 模式每次 2 Credits）")
         elif self.config.mode == SearchMode.GRANULARITY:
             max_segments = self.config.max_segments
             queries_per_segment = self.config.queries_per_segment
@@ -683,12 +717,15 @@ class PaperReferenceSearcher:
                 "unique_references": self.stats.unique_refs,
                 "refs_per_segment": self.config.refs_per_segment,
                 "api_calls": self.stats.api_calls,
+                "total_credits": self.stats.total_credits,
                 "stats": {
                     "segments_count": self.stats.segments_count,
                     "total_queries": self.stats.total_queries,
                     "api_calls": self.stats.api_calls,
                     "bailian_calls": self.stats.bailian_calls,
                     "tavily_calls": self.stats.tavily_calls,
+                    "tavily_credits": self.stats.tavily_credits,
+                    "total_credits": self.stats.total_credits,
                     "failed_calls": self.stats.failed_calls
                 }
             }
@@ -730,7 +767,10 @@ class PaperReferenceSearcher:
         if stats:
             output.append(f"API 调用：{stats.get('api_calls', 0)} 次")
             output.append(f"  - 百炼 API：{stats.get('bailian_calls', 0)} 次")
-            output.append(f"  - Tavily API：{stats.get('tavily_calls', 0)} 次")
+            output.append(f"  - Tavily API：{stats.get('tavily_calls', 0)} 次（advanced 模式）")
+            output.append(f"Credits 消耗：{stats.get('total_credits', 0)}")
+            output.append(f"  - 百炼 API：{stats.get('bailian_calls', 0)} Credits")
+            output.append(f"  - Tavily API：{stats.get('tavily_credits', 0)} Credits（每次 2 Credits）")
         
         for segment in results.get("segments", []):
             output.append("\n" + "-" * 70)
@@ -793,7 +833,10 @@ class PaperReferenceSearcher:
         if stats:
             output.append(f"> API 调用：**{stats.get('api_calls', 0)}** 次")
             output.append(f"> - 百炼 API：**{stats.get('bailian_calls', 0)}** 次")
-            output.append(f"> - Tavily API：**{stats.get('tavily_calls', 0)}** 次\n")
+            output.append(f"> - Tavily API：**{stats.get('tavily_calls', 0)}** 次（advanced 模式）")
+            output.append(f"> Credits 消耗：**{stats.get('total_credits', 0)}**")
+            output.append(f"> - 百炼 API：**{stats.get('bailian_calls', 0)}** Credits")
+            output.append(f"> - Tavily API：**{stats.get('tavily_credits', 0)}** Credits（每次 2 Credits）\n")
         
         for segment in results.get("segments", []):
             output.append(f"\n## 片段 {segment['segment_id']}: {segment['title']}\n")
@@ -1150,6 +1193,7 @@ def main():
                         print(f"   描述：{p['description']}")
                         print(f"   片段数：{p['max_segments']}，每片段查询数：{p['queries_per_segment']}")
                         print(f"   预计 API 调用：{p['estimated_calls']} 次")
+                        print(f"   预计 Credits 消耗：{p['estimated_credits']}（Tavily 每次 2 Credits）")
                         print(f"   预计返回文献：{p['estimated_refs']} 篇")
                     
                     result, plan_choice = get_valid_input(
